@@ -1,0 +1,43 @@
+# Incremental update build — layers on top of existing openclaw-ocr:local image.
+# Skips APT package install and base Node setup (already in base image).
+# Much faster than a full rebuild on slow disks / constrained RAM.
+FROM openclaw-ocr:local
+
+WORKDIR /app
+
+# Copy dependency manifests first so pnpm install layer is cached
+# if lockfile didn't change between versions.
+COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY --chown=node:node ui/package.json ./ui/package.json
+COPY --chown=node:node patches ./patches
+
+USER node
+# Cap heap to avoid OOM on memory-constrained hosts.
+RUN NODE_OPTIONS=--max-old-space-size=1536 pnpm install --frozen-lockfile
+
+# Copy full source and rebuild.
+COPY --chown=node:node . .
+
+# Normalize extension/agent dir permissions (same as main Dockerfile).
+USER root
+RUN for dir in /app/extensions /app/.agent /app/.agents; do \
+      if [ -d "$dir" ]; then \
+        find "$dir" -type d -exec chmod 755 {} +; \
+        find "$dir" -type f -exec chmod 644 {} +; \
+      fi; \
+    done
+
+USER node
+RUN pnpm build
+
+# Force pnpm for UI build (Bun may fail on ARM/Synology).
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
+
+USER root
+RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
+ && chmod 755 /app/openclaw.mjs
+
+ENV NODE_ENV=production
+USER node
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
